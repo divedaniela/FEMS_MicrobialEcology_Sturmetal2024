@@ -1,0 +1,101 @@
+---
+title: "Phyloseq SAMW2021"
+author: "Daniela Sturm"
+description: "Creation of phyloseq object post-dada2 processing"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Packages & Data
+```{r}
+library(phyloseq)
+library(zoo) 
+library(tibble) 
+library(biomformat)
+library(microbiomeutilities)
+
+## Set working directory
+setwd("~/Phyloseq Object/")
+
+## Load Data
+seqtab.chi=readRDS('~/dada2/seqtab.chi_Trimmed+Trunc.new.rds')
+seqtab.chi <- as.data.frame(seqtab.chi)
+seqtab.chi <- tibble::rownames_to_column(seqtab.chi, "Station")
+seqtab.chi$Station <- sub("_trimmed", "", seqtab.chi$Station)
+seqtab.chi <- data.frame(seqtab.chi[,-1], row.names=seqtab.chi[,1])
+seqtab.chi <- as.matrix(seqtab.chi)
+
+pr2_V9.taxa.trunc=readRDS('~/dada2/pr2_V9.taxa.trunc.TRIMMED+trunc.new.rds')
+
+## convert data frames to matrix
+pr2_V9.taxa.trunc <- as.matrix(pr2_V9.taxa.trunc)
+```
+
+```{r}
+SAMW2021 <- read.csv("~/Metadata/SAMW2021.csv", header= TRUE, row.names =1)
+SAMW2021 <- tibble::rownames_to_column(SAMW2021, "Station")
+SAMW2021$Station <- sub(".gz", "", SAMW2021$Station)
+SAMW2021 <- data.frame(SAMW2021[,-1], row.names=SAMW2021[,1])
+head(SAMW2021)
+sample_data <- "SAMW2021.csv"
+
+### create a phyloseq object with environmental data
+ps.PR2 <- phyloseq(otu_table(seqtab.chi, taxa_are_rows = FALSE), sample_data(SAMW2021), tax_table(pr2_V9.taxa.trunc))  
+ps.PR2 <- add_refseq(ps.PR2)    # add reference sequences
+
+dim(tax_table(pr2_V9.taxa.trunc))
+
+rowSums(otu_table(ps.PR2))
+mean(rowSums(otu_table(ps.PR2))) ##53653.7
+min(rowSums(otu_table(ps.PR2))) ##26444
+max(rowSums(otu_table(ps.PR2)))  ##194511
+set.seed(711) 
+ps.PR2.rare <- rarefy_even_depth(ps.PR2, sample.size = 26444, trimOTUs = TRUE)  
+
+saveRDS(ps.PR2.rare,"rarefied_phyloseq_pr2_V9.taxa.rds") 
+
+
+# create vector for ASV names
+dim(otu_table(ps.PR2.rare)) 
+dim(tax_table(ps.PR2.rare)) 
+a.vec <- as.vector(1:6613)   #number should reflect your total ASVs (look in ps.PR2.rare)
+a.nam <- cbind("asv_", a.vec) 
+a.nam <- as.data.frame(a.nam) 
+
+asv.names <- paste0(a.nam$V1, a.nam$a.vec) 
+asv.names <- as.data.frame(asv.names) 
+
+taxa_names(ps.PR2.rare) <- asv.names$asv.names
+length(taxa_names(ps.PR2.rare))
+
+# Restructuring tax_table to include 'best' classification
+bc.t <- t(as.data.frame(tax_table(ps.PR2.rare))) 
+bc.t[bc.t==""] <- NA 
+bc.fill <- na.locf(bc.t, na.rm = TRUE) 
+t.bc.fill <- as.data.frame(t(bc.fill)) 
+head(t.bc.fill) 
+rnc.bc <- rownames_to_column(t.bc.fill, "ASV") 
+
+## Creates a column with the best classification and the ASV
+rnc.bc$taxa_ASV <- paste(rnc.bc$Species,rnc.bc$ASV) 
+
+## Bind this column back onto the original tax_table 
+safe.bc <- as.data.frame(tax_table(ps.PR2.rare)) 
+safe.bc$taxa_ASV <- paste(rnc.bc$taxa_ASV)  
+
+# Setup object as tax_table
+bc.tax <- tax_table(safe.bc) 
+colnames(bc.tax) <- colnames(safe.bc) 
+rownames(bc.tax) <- rownames(safe.bc) 
+
+## Update phyloseq object with new table
+identical(bc.tax[1:6613,1:10], tax_table(ps.PR2.rare))  #should be true, 
+tax_table(ps.PR2.rare) <- bc.tax 
+
+saveRDS(ps.PR2.rare, "bestclassification_rarefied_SAMW2021_phyloseq_pr2_V9.taxa.rds")
+```

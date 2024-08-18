@@ -1,0 +1,267 @@
+---
+title: "Dada2 SAMW2021"
+author: "Daniela Sturm"
+description: "Dada2 (Callahan 2016) workflow of Raw 18S sequences"
+date: "07/09/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dada2)
+library(phyloseq)
+library(ggplot2)
+library(cowplot)
+library(knitr)
+library(zoo)
+library(tibble)
+library(vegan)
+library(biomformat)
+```
+
+### Programme custom functions
+```{r}
+# ggrare plots a rarefaction curve from a phyloseq object
+ggrare <- function(physeq_object, step = 10, label = NULL, color = NULL, plot = TRUE, parallel = FALSE, se = TRUE) {
+  
+  x <- methods::as(phyloseq::otu_table(physeq_object), "matrix")
+  if (phyloseq::taxa_are_rows(physeq_object)) { x <- t(x) }
+  
+  ## This script is adapted from vegan `rarecurve` function
+  tot <- rowSums(x)
+  S <- rowSums(x > 0)
+  nr <- nrow(x)
+  
+  rarefun <- function(i) {
+    cat(paste("rarefying sample", rownames(x)[i]), sep = "\n")
+    n <- seq(1, tot[i], by = step)
+    if (n[length(n)] != tot[i]) {
+      n <- c(n, tot[i])
+    }
+    y <- vegan::rarefy(x[i, ,drop = FALSE], n, se = se)
+    if (nrow(y) != 1) {
+      rownames(y) <- c(".S", ".se")
+      return(data.frame(t(y), Size = n, Sample = rownames(x)[i]))
+    } else {
+      return(data.frame(.S = y[1, ], Size = n, Sample = rownames(x)[i]))
+    }
+  }
+  if (parallel) {
+    out <- parallel::mclapply(seq_len(nr), rarefun, mc.preschedule = FALSE)
+  } else {
+    out <- lapply(seq_len(nr), rarefun)
+  }
+  df <- do.call(rbind, out)
+  
+  # Get sample data
+  if (!is.null(phyloseq::sample_data(physeq_object, FALSE))) {
+    sdf <- methods::as(phyloseq::sample_data(physeq_object), "data.frame")
+    sdf$Sample <- rownames(sdf)
+    data <- merge(df, sdf, by = "Sample")
+    labels <- data.frame(x = tot, y = S, Sample = rownames(x))
+    labels <- merge(labels, sdf, by = "Sample")
+  }
+  
+  # Add, any custom-supplied plot-mapped variables
+  if ( length(color) > 1 ) {
+    data$color <- color
+    names(data)[names(data) == "color"] <- deparse(substitute(color))
+    color <- deparse(substitute(color))
+  }
+  
+  if ( length(label) > 1 ) {
+    labels$label <- label
+    names(labels)[names(labels) == "label"] <- deparse(substitute(label))
+    label <- deparse(substitute(label))
+  }
+  
+  p <- ggplot2::ggplot(data = data,
+                       ggplot2::aes_string(x = "Size",
+                                           y = ".S",
+                                           group = "Sample",
+                                           color = color))
+  
+  p <- p + ggplot2::labs(x = "Sequence Sample Size", y = "Species Richness")
+  
+  if (!is.null(label)) {
+    p <- p + ggplot2::geom_text(data = labels,
+                                ggplot2::aes_string(x = "x",
+                                                    y = "y",
+                                                    label = label,
+                                                    color = color),
+                                size = 4, hjust = 0)
+  }
+  
+  p <- p + ggplot2::geom_line()
+  if (se) { ## add standard error if available
+    p <- p +
+      ggplot2::geom_ribbon(ggplot2::aes_string(ymin = ".S - .se",
+                                               ymax = ".S + .se",
+                                               color = NULL,
+                                               fill = color),
+                           alpha = 0.2)
+  }
+  if (plot) {
+    plot(p)
+  }
+  invisible(p)
+}
+```
+
+```{r}
+# path to location of raw sequencing files
+path <- "~/FASTQ/C2/Trimmed/"
+
+# use the list.files() function to print all files in the path directory
+list.files(path)
+```
+
+## Identify forward and reverse paired-end read files
+```{r}
+# extract first part of file names for future reference
+f.names <- as.vector(list.files(path, pattern = "_R1_001.trimmed.fastq", full.names = FALSE))
+r.names <- as.vector(list.files(path, pattern = "_R2_001.trimmed.fastq", full.names = FALSE))
+
+# identify forward and reverse read files
+fnFs <- sort(list.files(path, pattern = "_R1_001.trimmed.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern = "_R2_001.trimmed.fastq", full.names = TRUE))
+```
+
+### Plot sequence quality profiles
+```{r}
+# plot quality profiles for forward and reverse reads
+qpf <- plotQualityProfile(fnFs[]) 
+qpr <- plotQualityProfile(fnRs[])
+
+# save quality profiles (optional)
+ggsave("~/FASTQ/C2/output/PEACETIME_quality_F.Trimmed.jpeg", qpf, width = 100, height = 80, units = "cm", device = "jpeg")
+ggsave("~/FASTQ/C2/output/PEACETIME_quality_R.Trimmed.jpeg", qpr, width = 100, height = 80, units = "cm", device = "jpeg")
+
+# display quality profiles 
+qpf
+qpr
+```
+### Setup directory for filtered and trimmed sequences
+```{r}
+# sets up new directory titled 'filtered' within the current file path
+filt_path <- file.path(path, "filtered")
+
+# sets the way we want R to save new files into the new directory
+filtFs <- file.path(filt_path, paste0(f.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(filt_path, paste0(r.names, "_R_filt.fastq.gz"))
+```
+
+### Filter and trim sequences
+```{r}
+start_time_1 <- Sys.time()
+out.trunc.210_190 <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(130,120), maxN=0, maxEE=c(2,3), truncQ=2, rm.phix=TRUE, compress=TRUE, multithread=TRUE)
+end_time_1 <- Sys.time()
+head(out.trunc.210_190)
+end_time_1 - start_time_1 # 1.2 min
+```
+
+### Learn error rates
+```{r}
+# calculate the error model
+start_time_2 <- Sys.time()
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+end_time_2 <- Sys.time()
+end_time_2 - start_time_2 # 15.17555 mins
+
+# plot errors
+plot.errF <- plotErrors(errF, nominalQ = TRUE) + theme_bw() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+plot.errR <- plotErrors(errR, nominalQ = TRUE) + theme_bw() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+plot.errF
+plot.errR
+```
+
+### Dereplicate sequences
+```{r}
+# dereplicate sequences
+start_time_3 <- Sys.time()
+exists <- file.exists(filtFs)
+derepFs <- derepFastq(filtFs[exists], verbose = TRUE)
+derepRs <- derepFastq(filtRs[exists], verbose = TRUE)
+end_time_3 <- Sys.time()
+end_time_3 - start_time_3 # 2.1 mins
+
+# match names for clarity
+names(derepFs) <- f.names[exists]
+names(derepRs) <- r.names[exists]
+```
+
+### Resolve amplicon sequence variants (ASVs)
+```{r}
+start_time_4 <- Sys.time()
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE)
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE)
+end_time_4 <- Sys.time()
+end_time_4 - start_time_4 # 8.771654 mins
+```
+
+### Merge paired reads
+```{r}
+start_time_5 <- Sys.time()
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE)
+end_time_5 <- Sys.time()
+end_time_5 - start_time_5 # 1.1 mins
+head(mergers[[1]])
+```
+
+### Generate sequence table
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+#[1]   89 7036
+table(nchar(getSequences(seqtab)))
+seqtab <- seqtab[,nchar(colnames(seqtab)) %in% 51:300]  ## remove sequences under 50 nts
+```
+
+### Remove chimeras
+```{r}
+start_time_6 <- Sys.time()
+seqtab.chi <- removeBimeraDenovo(seqtab, method = "consensus", multithread = TRUE, verbose = TRUE)
+dim(seqtab.chi) ## 89 6762
+sum(seqtab.chi)/sum(seqtab) ##  0.9828778 , 2% of merged sequence reads
+end_time_6 <- Sys.time()
+end_time_6 - start_time_6 # 11 secs
+```
+
+### Track sequence loss (REWORD)
+```{r}
+# function for sum of unique sequences in a dataframe
+getN <- function(x) sum(getUniques(x))
+
+# bind columns: sequence; unique sequences after dada2 (forward only); unique sequences after merging forward and reverse reads; unique sequences after chimera removal
+track <- cbind(out.trunc.210_190, sapply(dadaFs, getN), sapply(mergers, getN), rowSums(seqtab.chi))
+colnames(track) <- c("input", "filtered", "denoised", "merged", "no chim")
+rownames(track) <- f.names
+saveRDS(seqtab.chi, file = "~/FASTQ/C2/output/seqtab.chi_Trimmed+Trunc.rds")
+
+# print table
+print(track)
+head(track)
+
+```
+
+### Assign taxonomy
+```{r}
+# assign taxonomy against PR2_V9 database from TARA
+start_time_8 <- Sys.time()
+pr2.taxa.trunc.210_190 <- assignTaxonomy(seqtab.chi,"~/Taxonomy_Databases/PR2_V9.fasta.gz", multithread = FALSE, taxLevels = c("Kingdom","Supergroup","Division","Phylum","Class","Order","Suborder","Family","Genus","Species"))
+end_time_8 <- Sys.time()
+end_time_8 - start_time_8 # 4.341561 hours
+pr2.taxa.trunc.210_190 <- as.data.frame(pr2.taxa.trunc.210_190)
+count(pr2.taxa.trunc.210_190$Phylum == '<N/A>')
+
+saveRDS(pr2.taxa.trunc.210_190, file = "~/FASTQ/C2/output/pr2_V9.taxa.trunc.TRIMMED+trunc.rds")
+```
+
